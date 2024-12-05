@@ -29,11 +29,7 @@ class MambaClassifier(nn.Module):
         super().__init__()
 
         # Add input embedding layer
-        self.embedding = (
-            nn.Linear(1, d_model)
-            if vocab_size is None
-            else nn.Embedding(vocab_size, d_model)
-        )
+        self.embedding = nn.Embedding(vocab_size, d_model)
 
         # Initialize Mamba backbone
         config = MambaConfig(d_model=d_model, n_layers=n_layers)
@@ -60,11 +56,8 @@ class MambaClassifier(nn.Module):
                 logits: Classification logits
                 loss: Classification loss (if labels provided)
         """
-        # Apply embedding/projection
-        if isinstance(self.embedding, nn.Embedding):
-            x = self.embedding(x.long().squeeze(-1))  # Handle token IDs
-        else:
-            x = self.embedding(x)  # Handle continuous inputs
+        # Apply embedding
+        x = self.embedding(x.long().squeeze(-1))  # Handle token IDs
 
         # Get sequence representations from backbone
         sequence_output = self.backbone(x)

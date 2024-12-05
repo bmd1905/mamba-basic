@@ -14,6 +14,7 @@ class MambaClassifier(nn.Module):
         n_layers: int = 2,
         num_classes: int = 2,
         dropout: float = 0.1,
+        vocab_size: int = None,
     ):
         """
         End-to-end Mamba model for classification tasks.
@@ -23,8 +24,16 @@ class MambaClassifier(nn.Module):
             n_layers: Number of Mamba layers
             num_classes: Number of classification categories
             dropout: Dropout rate for classifier head
+            vocab_size: Size of vocabulary for input embedding
         """
         super().__init__()
+
+        # Add input embedding layer
+        self.embedding = (
+            nn.Linear(1, d_model)
+            if vocab_size is None
+            else nn.Embedding(vocab_size, d_model)
+        )
 
         # Initialize Mamba backbone
         config = MambaConfig(d_model=d_model, n_layers=n_layers)
@@ -43,7 +52,7 @@ class MambaClassifier(nn.Module):
         Forward pass through the model.
 
         Args:
-            x: Input tensor of shape (batch_size, seq_len, d_model)
+            x: Input tensor of shape (batch_size, seq_len, 1) or (batch_size, seq_len) for embeddings
             labels: Optional tensor of shape (batch_size,) for computing loss
 
         Returns:
@@ -51,6 +60,12 @@ class MambaClassifier(nn.Module):
                 logits: Classification logits
                 loss: Classification loss (if labels provided)
         """
+        # Apply embedding/projection
+        if isinstance(self.embedding, nn.Embedding):
+            x = self.embedding(x.long().squeeze(-1))  # Handle token IDs
+        else:
+            x = self.embedding(x)  # Handle continuous inputs
+
         # Get sequence representations from backbone
         sequence_output = self.backbone(x)
 

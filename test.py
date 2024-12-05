@@ -3,11 +3,11 @@ import torch
 
 from src.models.model import MambaClassifier
 
-model = MambaClassifier(d_model=16, n_layers=2, num_classes=10, dropout=0.1)
+model = MambaClassifier(d_model=16, n_layers=2, num_classes=10, dropout=0.1, vocab_size=1000)
 
 # Forward pass without labels (inference)
-B, L, D = 2, 64, 16
-x = torch.randn(B, L, D)
+B, L = 2, 64  # batch_size, sequence_length
+x = torch.randint(0, 1000, (B, L, 1)).float()  # Shape: (batch_size, seq_len, 1)
 outputs = model(x)
 logits = outputs["logits"]  # Shape: (B, num_classes)
 

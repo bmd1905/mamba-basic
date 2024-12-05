@@ -32,12 +32,8 @@ def collate_fn(batch):
     return {"input_ids": input_ids, "labels": labels}
 
 
-def train():
-    # Initialize wandb
-    wandb.init(project="mamba-classification")
-
-    # Hyperparameters
-    config = {
+def get_default_config():
+    return {
         "d_model": 256,
         "n_layers": 4,
         "num_classes": 2,
@@ -48,12 +44,11 @@ def train():
         "max_length": 512,
     }
 
-    # Load dataset
-    dataset = load_dataset("imdb")
 
+def prepare_data(config):
+    dataset = load_dataset("imdb")
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
-    # Tokenize datasets
     tokenized_train = dataset["train"].map(
         lambda x: tokenize_function(x, tokenizer, config["max_length"]),
         batched=True,
@@ -65,7 +60,6 @@ def train():
         remove_columns=dataset["test"].column_names,
     )
 
-    # Create dataloaders with collate_fn
     train_loader = DataLoader(
         tokenized_train,
         batch_size=config["batch_size"],
@@ -76,7 +70,10 @@ def train():
         tokenized_test, batch_size=config["batch_size"], collate_fn=collate_fn
     )
 
-    # Initialize model with input projection
+    return train_loader, test_loader, tokenizer
+
+
+def setup_model(config, tokenizer):
     device = torch.device(
         "cuda"
         if torch.cuda.is_available()
@@ -92,104 +89,111 @@ def train():
         vocab_size=tokenizer.vocab_size,
     ).to(device)
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+    return model, device
 
-    # Initialize optimizer
+
+def train_epoch(model, train_loader, optimizer, device):
+    model.train()
+    train_loss = 0
+    train_correct = 0
+    train_total = 0
+
+    progress_bar = tqdm(train_loader, desc="Training")
+    for batch in progress_bar:
+        input_ids = batch["input_ids"].clone().detach().to(device).float()
+        labels = batch["labels"].clone().detach().to(device)
+
+        outputs = model(input_ids, labels)
+        loss = outputs["loss"]
+        logits = outputs["logits"]
+
+        optimizer.zero_grad()
+        loss.backward()
+        clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        predictions = torch.argmax(logits, dim=1)
+        train_correct += (predictions == labels).sum().item()
+        train_total += labels.size(0)
+        train_loss += loss.item()
+
+        progress_bar.set_postfix(
+            {"loss": loss.item(), "acc": train_correct / train_total}
+        )
+
+    return train_loss / len(train_loader), train_correct / train_total
+
+
+def evaluate(model, test_loader, device):
+    model.eval()
+    test_loss = 0
+    test_correct = 0
+    test_total = 0
+
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch["input_ids"].to(device).float()
+            labels = batch["labels"].to(device)
+
+            outputs = model(input_ids, labels)
+            test_loss += outputs["loss"].item()
+            predictions = torch.argmax(outputs["logits"], dim=1)
+            test_correct += (predictions == labels).sum().item()
+            test_total += labels.size(0)
+
+    return test_loss / len(test_loader), test_correct / test_total
+
+
+def save_checkpoint(model, optimizer, epoch, test_acc):
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "test_acc": test_acc,
+        },
+        "best_model.pt",
+    )
+
+
+def train():
+    wandb.init(project="mamba-classification")
+    config = get_default_config()
+
+    train_loader, test_loader, tokenizer = prepare_data(config)
+    model, device = setup_model(config, tokenizer)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
-
-    # Learning rate scheduling
     scheduler = ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=2, verbose=True
     )
 
     best_test_acc = 0
     patience_counter = 0
-    max_patience = 5  # for early stopping
+    max_patience = 5
 
-    # Training loop
     for epoch in range(config["num_epochs"]):
-        model.train()
-        train_loss = 0
-        train_correct = 0
-        train_total = 0
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, device)
+        test_loss, test_acc = evaluate(model, test_loader, device)
 
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
-        for batch in progress_bar:
-            # Convert input_ids and labels to tensors - use clone().detach() to avoid warnings
-            input_ids = batch["input_ids"].clone().detach().to(device).float()
-            labels = batch["labels"].clone().detach().to(device)
-
-            # Forward pass
-            outputs = model(input_ids, labels)
-            loss = outputs["loss"]
-            logits = outputs["logits"]
-
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-
-            # Gradient clipping
-            clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            optimizer.step()
-
-            # Calculate accuracy
-            predictions = torch.argmax(logits, dim=1)
-            train_correct += (predictions == labels).sum().item()
-            train_total += labels.size(0)
-            train_loss += loss.item()
-
-            # Update progress bar
-            progress_bar.set_postfix(
-                {"loss": loss.item(), "acc": train_correct / train_total}
-            )
-
-        # Evaluation
-        model.eval()
-        test_loss = 0
-        test_correct = 0
-        test_total = 0
-
-        with torch.no_grad():
-            for batch in test_loader:
-                input_ids = batch["input_ids"].to(device).float()
-                labels = batch["labels"].to(device)
-
-                outputs = model(input_ids, labels)
-                test_loss += outputs["loss"].item()
-                predictions = torch.argmax(outputs["logits"], dim=1)
-                test_correct += (predictions == labels).sum().item()
-                test_total += labels.size(0)
-
-        # Log metrics
         metrics = {
-            "train_loss": train_loss / len(train_loader),
-            "train_acc": train_correct / train_total,
-            "test_loss": test_loss / len(test_loader),
-            "test_acc": test_correct / test_total,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "test_loss": test_loss,
+            "test_acc": test_acc,
         }
         wandb.log(metrics)
         print(f"Epoch {epoch+1} metrics:", metrics)
 
-        # Learning rate scheduling
-        scheduler.step(metrics["test_loss"])
+        scheduler.step(test_loss)
 
-        # Model checkpointing
-        if metrics["test_acc"] > best_test_acc:
-            best_test_acc = metrics["test_acc"]
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "test_acc": metrics["test_acc"],
-                },
-                "best_model.pt",
-            )
+        if test_acc > best_test_acc:
+            best_test_acc = test_acc
+            save_checkpoint(model, optimizer, epoch, test_acc)
             patience_counter = 0
         else:
             patience_counter += 1
 
-        # Early stopping
         if patience_counter >= max_patience:
             print(f"Early stopping triggered after epoch {epoch+1}")
             break

@@ -1,6 +1,8 @@
 import torch
 from datasets import load_dataset
+from torch.nn.utils import clip_grad_norm_
 from torch.nn.utils.rnn import pad_sequence
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -36,21 +38,18 @@ def train():
 
     # Hyperparameters
     config = {
-        "d_model": 512,
+        "d_model": 256,
         "n_layers": 4,
         "num_classes": 2,
         "dropout": 0.1,
-        "learning_rate": 1e-4,
-        "batch_size": 1,
+        "learning_rate": 2e-4,
+        "batch_size": 32,
         "num_epochs": 3,
         "max_length": 512,
     }
 
     # Load dataset
     dataset = load_dataset("imdb")
-
-    dataset["train"] = dataset["train"].select(range(100))
-    dataset["test"] = dataset["test"].select(range(100))
 
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
@@ -78,7 +77,13 @@ def train():
     )
 
     # Initialize model with input projection
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
     model = MambaClassifier(
         d_model=config["d_model"],
         n_layers=config["n_layers"],
@@ -86,9 +91,19 @@ def train():
         dropout=config["dropout"],
         vocab_size=tokenizer.vocab_size,
     ).to(device)
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
 
     # Initialize optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
+
+    # Learning rate scheduling
+    scheduler = ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=2, verbose=True
+    )
+
+    best_test_acc = 0
+    patience_counter = 0
+    max_patience = 5  # for early stopping
 
     # Training loop
     for epoch in range(config["num_epochs"]):
@@ -111,6 +126,10 @@ def train():
             # Backward pass
             optimizer.zero_grad()
             loss.backward()
+
+            # Gradient clipping
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optimizer.step()
 
             # Calculate accuracy
@@ -150,6 +169,30 @@ def train():
         }
         wandb.log(metrics)
         print(f"Epoch {epoch+1} metrics:", metrics)
+
+        # Learning rate scheduling
+        scheduler.step(metrics["test_loss"])
+
+        # Model checkpointing
+        if metrics["test_acc"] > best_test_acc:
+            best_test_acc = metrics["test_acc"]
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "test_acc": metrics["test_acc"],
+                },
+                "best_model.pt",
+            )
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        # Early stopping
+        if patience_counter >= max_patience:
+            print(f"Early stopping triggered after epoch {epoch+1}")
+            break
 
 
 if __name__ == "__main__":

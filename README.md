@@ -1,4 +1,5 @@
 # Simple Mamba Classifier
+ [Link Notebook](https://colab.research.google.com/drive/1onwXdIn0fhxBeTLfwoP3McxvpMqIMd_H)
 
 This is a simple Mamba Classifier using a Mamba model implemented in [@alxndrTL/mamba.py](https://github.com/alxndrTL/mamba.py).
 
